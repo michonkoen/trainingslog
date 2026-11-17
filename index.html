@@ -1,0 +1,361 @@
+<!doctype html>
+<html lang="nl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Trainingslog</title>
+<style>
+:root{color-scheme:dark;--bg:#111516;--card:#1c2324;--line:#354142;--ink:#eef5ee;--muted:#b3c0b9;--accent:#cbf680}
+*{box-sizing:border-box}[hidden]{display:none!important}
+body{margin:0;background:var(--bg);color:var(--ink);font-family:"DM Sans",system-ui,sans-serif;font-size:16px;line-height:1.5}
+main{width:min(100% - 32px,740px);margin:auto;padding:36px 0 56px}
+h1,h2,h3,p{margin:0}h1{font-size:clamp(2.3rem,8vw,3.5rem);letter-spacing:-.065em;line-height:1.05}h2{font-size:1.6rem;letter-spacing:-.035em}h3{font-size:1.12rem}
+header{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:24px}.muted,small{color:var(--muted)}.stack{display:grid;gap:12px}.section{margin-top:16px}
+nav,.row,.toolbar{display:flex;gap:8px;align-items:center;flex-wrap:wrap}.toolbar{gap:12px}.toolbar label{flex:1;min-width:144px}
+nav{padding-bottom:12px;border-bottom:1px solid var(--line);margin-bottom:16px}
+button,input,select{font:inherit;border:1px solid var(--line);border-radius:10px;color:inherit;background:#13191a;min-height:44px;padding:8px 12px}
+button,summary,select{cursor:pointer}button:hover{border-color:var(--accent)}button[aria-pressed=true],.primary{background:var(--accent);border-color:var(--accent);color:#1a2511;font-weight:700}
+button:disabled{opacity:.55;cursor:default}:focus-visible{outline:2px solid var(--accent);outline-offset:3px}
+label{display:grid;gap:4px}input,select{width:100%;min-width:0}input[type=file]{padding:6px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:16px}.card-head{display:grid;grid-template-columns:minmax(0,1fr) minmax(106px,145px);gap:12px;align-items:end}.status{min-height:1.5em;color:var(--accent)}
+.choices{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:7px;margin-top:12px}.choices button{text-align:left;padding:7px 9px;font-size:.91rem}.choices .skip{grid-column:1/-1;color:var(--muted)}.choices .skip[aria-pressed=true]{color:#1a2511}
+.historic{width:100%;border-collapse:collapse}.historic td{border-top:1px solid var(--line);vertical-align:top;padding:9px 0}.historic td:last-child{text-align:right;padding-left:10px}.historic caption{text-align:left;font-weight:700;padding-bottom:6px}.reps{display:flex;gap:8px;margin-top:10px}.reps label{max-width:155px}
+details{margin-top:24px}details>div{margin-top:10px}summary{color:var(--muted)}
+@media(max-width:380px){.card{padding:12px}.card-head{grid-template-columns:minmax(0,1fr) minmax(92px,114px)}}
+</style>
+</head>
+<body>
+<main>
+<header><h1>Trainingslog</h1></header>
+<nav aria-label="Onderdelen" id="nav">
+  <button data-tab="training" type="button" aria-pressed="true">Training</button>
+  <button data-tab="historie" type="button" aria-pressed="false">Historie</button>
+</nav>
+<div id="status" class="status" role="status"></div>
+<section id="screen" aria-label="Trainingslog"></section>
+<details id="data" hidden><summary>Back-up en import</summary>
+  <div class="stack">
+    <button type="button" id="export">Trainingslog exporteren</button>
+    <label>Trainingslog importeren <input type="file" id="import" accept=".json,application/json"></label>
+  </div>
+</details>
+</main>
+<script>
+'use strict';
+const storageKey = 'trainingslog.v1';
+const ratings = {
+  easy: ['Heel makkelijk', 5],
+  fine: ['Redelijk makkelijk', 2.5],
+  barely: ['Net gehaald', 0],
+  missed: ['Niet gehaald', 0],
+  recorded: ['Gelukt', 0]
+};
+const $ = (id) => document.getElementById(id);
+const number = new Intl.NumberFormat('nl-NL', {maximumFractionDigits: 2});
+const formatKg = (weight) => number.format(weight) + ' kg';
+const formatDate = (date) => new Intl.DateTimeFormat('nl-NL', {dateStyle:'long'}).format(new Date(date + 'T12:00:00'));
+const isoDate = (date) => [date.getFullYear(), date.getMonth()+1, date.getDate()].map((part)=>String(part).padStart(2,'0')).join('-');
+const validWeight = (value) => typeof value === 'number' && Number.isFinite(value) && value >= 0;
+const validDate = (value) => typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value) && !Number.isNaN(new Date(value + 'T12:00:00').getTime()) && isoDate(new Date(value + 'T12:00:00')) === value;
+const wholePositive = (v) => Number.isInteger(v) && v > 0;
+const repSpec = (v) => typeof v === 'string' && /^\d+(?:[–-]\d+)?$/.test(v);
+
+function validate(value) {
+  if (value?.version !== 1 || !Array.isArray(value.days) || !value.days.length || !Array.isArray(value.sessions)) throw Error('Kies een geldig trainingslogbestand.');
+  const days = new Map();
+  const exercises = new Map();
+  for (const day of value.days) {
+    if (!day?.id || days.has(day.id) || typeof day.name !== 'string' || typeof day.title !== 'string' || !Array.isArray(day.exercises) || (day.note != null && typeof day.note !== 'string')) throw Error('Het weekprogramma is ongeldig.');
+    days.set(day.id, day);
+    for (const exercise of day.exercises) {
+      if (!exercise?.id || exercises.has(exercise.id) || typeof exercise.name !== 'string' || !wholePositive(exercise.sets) || !repSpec(exercise.reps) || !['kg','body'].includes(exercise.unit) || (exercise.start !== null && !validWeight(exercise.start))) throw Error('Een oefening in het bestand is ongeldig.');
+      exercises.set(exercise.id, day.id);
+    }
+    for (const exercise of day.exercises) {
+      if (exercise.alternativeFor && !day.exercises.some((original) => original.id === exercise.alternativeFor && !original.alternativeFor)) throw Error('Een vervangende oefening is ongeldig.');
+    }
+  }
+  const dates = new Set();
+  for (const session of value.sessions) {
+    const key = session?.date + '/' + session?.dayId;
+    if (!validDate(session?.date) || !days.has(session.dayId) || dates.has(key) || !Array.isArray(session.entries) || !session.entries.length) throw Error('Een sessie in het bestand is ongeldig.');
+    dates.add(key);
+    const seen = new Set();
+    for (const entry of session.entries) {
+      if (!entry || exercises.get(entry.id) !== session.dayId || seen.has(entry.id) || !Object.hasOwn(ratings,entry.rating) || !wholePositive(entry.sets) || !repSpec(entry.reps) || !validWeight(entry.weight)) throw Error('Een gelogde oefening is ongeldig.');
+      seen.add(entry.id);
+    }
+  }
+  return value;
+}
+
+let data = null;
+try {
+  const saved = localStorage.getItem(storageKey);
+  if (saved) data = validate(JSON.parse(saved));
+} catch {
+  $('status').textContent = 'Je lokale trainingslog kon niet worden geladen.';
+}
+let tab = 'training';
+let date = isoDate(new Date());
+let dayId = '';
+let drafts = new Map();
+
+function el(tag, text, attrs = {}) {
+  const element = document.createElement(tag);
+  if (text != null) element.textContent = text;
+  for (const [name,value] of Object.entries(attrs)) element.setAttribute(name,value);
+  return element;
+}
+function button(text, handler, className = '', pressed = null) {
+  const element = el('button', text, {type:'button',class:className});
+  if (pressed !== null) element.setAttribute('aria-pressed', pressed);
+  element.addEventListener('click', handler);
+  return element;
+}
+function label(text, field) {
+  const wrapper = el('label', text);
+  wrapper.append(field);
+  return wrapper;
+}
+function setStatus(message) {
+  $('status').textContent = message;
+}
+function persist(value) {
+  try {
+    localStorage.setItem(storageKey, JSON.stringify(value));
+    data = value;
+    return true;
+  } catch {
+    setStatus('Opslaan is mislukt. Open de site in je gewone browser of maak opslagruimte vrij.');
+    return false;
+  }
+}
+function proposed(exercise, beforeDate, sessions) {
+  if (exercise.unit === 'body') return 0;
+  const last = sessions.filter((item) => item.date < beforeDate)
+    .sort((a,b) => b.date.localeCompare(a.date))
+    .map((item) => item.entries.find((entry) => entry.id === exercise.id))
+    .find(Boolean);
+  return last ? Math.round((last.weight + ratings[last.rating][1])*100)/100 : exercise.start;
+}
+function preferredDay() {
+  const weekday = (new Date(date + 'T12:00:00').getDay()+6)%7;
+  return data.days[weekday] || data.days[0];
+}
+function createDraft(day, original) {
+  const logged = data.sessions.find((session) => session.dayId === day.id && session.date === date);
+  const choices = [original,...day.exercises.filter((item) => item.alternativeFor === original.id)];
+  const entry = logged?.entries.find((item) => choices.some((choice) => choice.id === item.id));
+  const exercise = choices.find((choice) => choice.id === entry?.id) || original;
+  const weight = entry?.weight ?? proposed(exercise, date, data.sessions);
+  return {id:exercise.id, weight:weight == null ? '' : String(weight), sets:String(entry?.sets ?? exercise.sets), reps:entry?.reps ?? exercise.reps, rating:entry?.rating ?? (logged ? 'skip' : '')};
+}
+function drawExercise(day, original, draft) {
+  const exercise = day.exercises.find((item) => item.id === draft.id);
+  const card = el('article', null, {class:'card'});
+  const header = el('div', null, {class:'card-head'});
+  const title = el('div');
+  title.append(el('h3', exercise.name), el('small', exercise.sets + ' × ' + exercise.reps + (original.optional ? ' · optioneel' : '')));
+  const alternatives = day.exercises.filter((item) => item.alternativeFor === original.id);
+  if (alternatives.length) {
+    const swap = el('select',null,{'aria-label':'Oefening kiezen'});
+    for (const choice of [original,...alternatives]) swap.append(el('option',choice.name,{value:choice.id}));
+    swap.value = draft.id;
+    swap.onchange = () => {
+      const replacement = day.exercises.find((item) => item.id === swap.value);
+      const weight = proposed(replacement, date, data.sessions);
+      Object.assign(draft, {id:replacement.id, sets:String(replacement.sets), reps:replacement.reps, rating:'',weight:weight == null ? '' : String(weight)});
+      render();
+    };
+    title.append(swap);
+  }
+  header.append(title);
+  if (exercise.unit === 'kg') {
+    const weight = el('input',null,{type:'text',inputmode:'decimal',placeholder:'bijv. 60',value:draft.weight});
+    weight.oninput = () => {draft.weight = weight.value;};
+    header.append(label('Gewicht (kg)',weight));
+  } else {
+    header.append(el('small','Lichaamsgewicht'));
+  }
+  card.append(header);
+  const reps = el('div',null,{class:'reps'});
+  const actualSets = el('input', null, {type:'number',min:'1',step:'1',value:draft.sets});
+  actualSets.oninput = () => {draft.sets = actualSets.value;};
+  const actualReps = el('input', null, {type:'text',inputmode:'text',value:draft.reps});
+  actualReps.oninput = () => {draft.reps = actualReps.value;};
+  reps.append(label('Sets uitgevoerd',actualSets),label('Reps per set',actualReps));
+  card.append(reps);
+  const choices = el('div',null,{class:'choices',role:'group','aria-label':'Resultaat ' + exercise.name});
+  const keys = exercise.unit === 'kg' ? ['easy','fine','barely','missed'] : ['recorded','missed'];
+  if (draft.rating === 'recorded' && exercise.unit === 'kg') keys.push('recorded');
+  keys.push('skip');
+  const choicesButtons = [];
+  for (const key of keys) {
+    const choice = button(key==='skip' ? 'Overgeslagen' : ratings[key][0], () => {
+      draft.rating = key;
+      choicesButtons.forEach(([id, item]) => item.setAttribute('aria-pressed',String(id === key)));
+    },key==='skip' ? 'skip' : '',draft.rating===key);
+    choicesButtons.push([key,choice]);
+    choices.append(choice);
+  }
+  card.append(choices);
+  return card;
+}
+function saveTraining(day, routine) {
+  const entries = [];
+  for (const original of routine) {
+    const draft = drafts.get(original.id);
+    const exercise = day.exercises.find((item) => item.id === draft.id);
+    if (draft.rating === 'skip' || (!draft.rating && original.optional)) continue;
+    if (!draft.rating) return setStatus('Kies bij ' + exercise.name + ' hoe het ging of tik op Overgeslagen.');
+    const sets = Number(draft.sets);
+    const reps = draft.reps.trim();
+    const rawWeight = draft.weight.trim().replace(',','.');
+    const weight = exercise.unit === 'body' ? 0 : Number(rawWeight);
+    if (exercise.unit === 'kg' && (!rawWeight || !validWeight(weight))) return setStatus('Vul het gebruikte gewicht in voor ' + exercise.name + '.');
+    if (!wholePositive(sets) || !repSpec(reps)) return setStatus('Controleer de sets en reps bij ' + exercise.name + '.');
+    entries.push({id:draft.id,weight,sets,reps,rating:draft.rating});
+  }
+  if (!entries.length) return setStatus('Vul minstens één oefening in.');
+  const sessions = data.sessions.filter((item) => item.dayId !== day.id || item.date !== date);
+  sessions.push({dayId:day.id,date,entries});
+  if (persist({...data,sessions})) {
+    drafts = new Map();
+    tab = 'historie';
+    render();
+    setStatus('Training opgeslagen.');
+  }
+}
+function drawTraining() {
+  const day = data.days.find((item) => item.id === dayId) || preferredDay();
+  const daySelect = el('select');
+  for (const option of data.days) daySelect.append(el('option',option.name + ' · ' + option.title,{value:option.id}));
+  daySelect.value = day.id;
+  daySelect.onchange = () => {
+    dayId = daySelect.value;
+    drafts = new Map();
+    setStatus('');
+    render();
+  };
+  const dateInput = el('input',null,{type:'date',value:date});
+  dateInput.onchange = () => {
+    if (!validDate(dateInput.value)) {dateInput.value = date; return;}
+    date = dateInput.value;
+    dayId = '';
+    drafts = new Map();
+    setStatus('');
+    render();
+  };
+  const toolbar = el('div',null,{class:'toolbar'});
+  toolbar.append(label('Trainingsdag',daySelect),label('Datum',dateInput));
+  const screen = $('screen');
+  screen.append(toolbar,el('h2',day.title,{class:'section'}));
+  if (day.note) screen.append(el('p',day.note,{class:'muted'}));
+  const routine = day.exercises.filter((item) => !item.alternativeFor);
+  if (!routine.length) return;
+  const cards = el('div',null,{class:'stack section'});
+  for (const exercise of routine) {
+    if (!drafts.has(exercise.id)) drafts.set(exercise.id,createDraft(day,exercise));
+    cards.append(drawExercise(day,exercise,drafts.get(exercise.id)));
+  }
+  screen.append(cards,button('Training opslaan',()=>saveTraining(day,routine),'primary section'));
+}
+function drawHistory() {
+  const screen = $('screen');
+  screen.append(el('h2','Historie'));
+  const sessions = [...data.sessions].sort((a,b) => b.date.localeCompare(a.date));
+  if (!sessions.length) {
+    screen.append(el('p','Je opgeslagen trainingen verschijnen hier.',{class:'muted'}));
+    return;
+  }
+  const history = el('div',null,{class:'stack section'});
+  for (const session of sessions) {
+    const day = data.days.find((item) => item.id === session.dayId);
+    const card = el('article',null,{class:'card'});
+    card.append(el('h3',formatDate(session.date)));
+    const table = el('table',null,{class:'historic'});
+    table.append(el('caption',day.title));
+    const tbody = el('tbody');
+    for (const entry of session.entries) {
+      const exercise = day.exercises.find((item) => item.id === entry.id);
+      const tr = el('tr');
+      const left = el('td',exercise.name);
+      left.append(el('br'),el('small',entry.sets + ' × ' + entry.reps));
+      const right = el('td',exercise.unit==='body' ? 'Lichaamsgewicht' : formatKg(entry.weight));
+      right.append(el('br'),el('small',ratings[entry.rating][0]));
+      tr.append(left,right);
+      tbody.append(tr);
+    }
+    table.append(tbody);
+    card.append(table,button('Bewerken',() => {
+      tab = 'training';
+      date = session.date;
+      dayId = day.id;
+      drafts = new Map();
+      setStatus('');
+      render();
+    }));
+    history.append(card);
+  }
+  screen.append(history);
+}
+async function importFile(input) {
+  const file = input.files[0];
+  if (!file) return;
+  try {
+    const imported = validate(JSON.parse(await file.text()));
+    if (data && !window.confirm('Wil je je huidige schema en historie vervangen door dit bestand?')) return;
+    if (persist(imported)) {
+      dayId = '';
+      tab = 'training';
+      date = isoDate(new Date());
+      drafts = new Map();
+      render();
+      setStatus('Trainingslog geladen.');
+    }
+  } catch {
+    setStatus('Dit bestand is geen geldig trainingslog. Kies het oorspronkelijke JSON-bestand.');
+  } finally {
+    input.value = '';
+  }
+}
+function render() {
+  $('screen').replaceChildren();
+  $('nav').hidden = !data;
+  $('data').hidden = !data;
+  for (const item of $('nav').querySelectorAll('button')) item.setAttribute('aria-pressed',String(item.dataset.tab===tab));
+  if (!data) {
+    const input = el('input',null,{type:'file',accept:'.json,application/json'});
+    input.onchange = () => importFile(input);
+    const intro = el('div',null,{class:'card stack'});
+    intro.append(el('h2','Laad je trainingsschema'),el('p','Kies je persoonlijke trainingsbestand om te beginnen.',{class:'muted'}),label('Trainingsbestand (.json)',input));
+    $('screen').append(intro);
+    return;
+  }
+  if (tab==='training') drawTraining();
+  else drawHistory();
+}
+for (const item of $('nav').querySelectorAll('button')) item.onclick = () => {
+  if (item.dataset.tab === 'training' && tab === 'historie' && drafts.size === 0) {
+    date = isoDate(new Date());
+    dayId = '';
+  }
+  tab = item.dataset.tab;
+  setStatus('');
+  render();
+};
+$('import').onchange = () => importFile($('import'));
+$('export').onclick = () => {
+  const blob = new Blob([JSON.stringify(data,null,2)],{type:'application/json'});
+  const url = URL.createObjectURL(blob);
+  const link = el('a',null,{href:url,download:'trainingslog-' + isoDate(new Date()) + '.json'});
+  document.body.append(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(url),1000);
+};
+render();
+</script>
+</body>
+</html>
