@@ -20,7 +20,7 @@ label{display:grid;gap:4px}input,select{width:100%;min-width:0}input[type=file]{
 .card{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:16px}.card-head{display:grid;grid-template-columns:minmax(0,1fr) minmax(106px,145px);gap:12px;align-items:end}.status{min-height:1.5em;color:var(--accent)}
 .choices{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:7px;margin-top:12px}.choices button{text-align:left;padding:7px 9px;font-size:.91rem}.choices .skip{grid-column:1/-1;color:var(--muted)}.choices .skip[aria-pressed=true]{color:#1a2511}
 .historic{width:100%;border-collapse:collapse}.historic td{border-top:1px solid var(--line);vertical-align:top;padding:9px 0}.historic td:last-child{text-align:right;padding-left:10px}.historic caption{text-align:left;font-weight:700;padding-bottom:6px}.reps{display:flex;gap:8px;margin-top:10px}.reps label{max-width:155px}
-details{margin-top:24px}details>div{margin-top:10px}summary{color:var(--muted)}
+.cloud{margin:0 0 16px}.cloud form{margin-bottom:10px}.cloud form label{max-width:340px}.cloud button{justify-self:start}details{margin-top:24px}details>div{margin-top:10px}summary{color:var(--muted)}
 @media(max-width:380px){.card{padding:12px}.card-head{grid-template-columns:minmax(0,1fr) minmax(92px,114px)}}
 </style>
 </head>
@@ -31,6 +31,23 @@ details{margin-top:24px}details>div{margin-top:10px}summary{color:var(--muted)}
   <button data-tab="training" type="button" aria-pressed="true">Training</button>
   <button data-tab="historie" type="button" aria-pressed="false">Historie</button>
 </nav>
+<details id="cloud" class="card cloud" hidden>
+  <summary>Online opslag</summary>
+  <div class="stack">
+    <p id="cloud-status" class="muted" role="status">Verbinding maken…</p>
+    <form id="cloud-login" class="stack" hidden>
+      <label>E-mailadres <input name="email" type="email" autocomplete="username" required></label>
+      <label>Wachtwoord <input name="password" type="password" autocomplete="current-password" required></label>
+      <button type="submit" class="primary">Inloggen</button>
+    </form>
+    <div class="row">
+      <button id="cloud-upload" type="button" hidden>Lokaal log online opslaan</button>
+      <button id="cloud-download" type="button" hidden>Cloudversie ophalen</button>
+      <button id="cloud-refresh" type="button" hidden>Opnieuw synchroniseren</button>
+      <button id="cloud-logout" type="button" hidden>Uitloggen</button>
+    </div>
+  </div>
+</details>
 <div id="status" class="status" role="status"></div>
 <section id="screen" aria-label="Trainingslog"></section>
 <details id="data" hidden><summary>Back-up en import</summary>
@@ -90,9 +107,10 @@ function validate(value) {
 }
 
 let data = null;
+let lastStored = null;
 try {
-  const saved = localStorage.getItem(storageKey);
-  if (saved) data = validate(JSON.parse(saved));
+  lastStored = localStorage.getItem(storageKey);
+  if (lastStored) data = validate(JSON.parse(lastStored));
 } catch {
   $('status').textContent = 'Je lokale trainingslog kon niet worden geladen.';
 }
@@ -100,6 +118,7 @@ let tab = 'training';
 let date = isoDate(new Date());
 let dayId = '';
 let drafts = new Map();
+let draftChanged = false;
 
 function el(tag, text, attrs = {}) {
   const element = document.createElement(tag);
@@ -123,7 +142,14 @@ function setStatus(message) {
 }
 function persist(value) {
   try {
-    localStorage.setItem(storageKey, JSON.stringify(value));
+    const storedNow = localStorage.getItem(storageKey);
+    const payload = JSON.stringify(value);
+    if (storedNow !== lastStored && storedNow !== payload) {
+      setStatus('Dit log is gewijzigd in een ander tabblad. Herlaad de pagina om die wijzigingen te zien.');
+      return false;
+    }
+    localStorage.setItem(storageKey, payload);
+    lastStored = payload;
     data = value;
     return true;
   } catch {
@@ -165,6 +191,7 @@ function drawExercise(day, original, draft) {
     swap.onchange = () => {
       const replacement = day.exercises.find((item) => item.id === swap.value);
       const weight = proposed(replacement, date, data.sessions);
+      draftChanged = true;
       Object.assign(draft, {id:replacement.id, sets:String(replacement.sets), reps:replacement.reps, rating:'',weight:weight == null ? '' : String(weight)});
       render();
     };
@@ -173,7 +200,7 @@ function drawExercise(day, original, draft) {
   header.append(title);
   if (exercise.unit === 'kg') {
     const weight = el('input',null,{type:'text',inputmode:'decimal',placeholder:'bijv. 60',value:draft.weight});
-    weight.oninput = () => {draft.weight = weight.value;};
+    weight.oninput = () => {draftChanged = true; draft.weight = weight.value;};
     header.append(label('Gewicht (kg)',weight));
   } else {
     header.append(el('small','Lichaamsgewicht'));
@@ -181,9 +208,9 @@ function drawExercise(day, original, draft) {
   card.append(header);
   const reps = el('div',null,{class:'reps'});
   const actualSets = el('input', null, {type:'number',min:'1',step:'1',value:draft.sets});
-  actualSets.oninput = () => {draft.sets = actualSets.value;};
+  actualSets.oninput = () => {draftChanged = true; draft.sets = actualSets.value;};
   const actualReps = el('input', null, {type:'text',inputmode:'text',value:draft.reps});
-  actualReps.oninput = () => {draft.reps = actualReps.value;};
+  actualReps.oninput = () => {draftChanged = true; draft.reps = actualReps.value;};
   reps.append(label('Sets uitgevoerd',actualSets),label('Reps per set',actualReps));
   card.append(reps);
   const choices = el('div',null,{class:'choices',role:'group','aria-label':'Resultaat ' + exercise.name});
@@ -193,6 +220,7 @@ function drawExercise(day, original, draft) {
   const choicesButtons = [];
   for (const key of keys) {
     const choice = button(key==='skip' ? 'Overgeslagen' : ratings[key][0], () => {
+      draftChanged = true;
       draft.rating = key;
       choicesButtons.forEach(([id, item]) => item.setAttribute('aria-pressed',String(id === key)));
     },key==='skip' ? 'skip' : '',draft.rating===key);
@@ -222,9 +250,11 @@ function saveTraining(day, routine) {
   sessions.push({dayId:day.id,date,entries});
   if (persist({...data,sessions})) {
     drafts = new Map();
+    draftChanged = false;
     tab = 'historie';
     render();
-    setStatus('Training opgeslagen.');
+    setStatus('Training opgeslagen op dit apparaat.');
+    window.dispatchEvent(new Event('trainingslog:save'));
   }
 }
 function drawTraining() {
@@ -235,6 +265,7 @@ function drawTraining() {
   daySelect.onchange = () => {
     dayId = daySelect.value;
     drafts = new Map();
+    draftChanged = false;
     setStatus('');
     render();
   };
@@ -244,6 +275,7 @@ function drawTraining() {
     date = dateInput.value;
     dayId = '';
     drafts = new Map();
+    draftChanged = false;
     setStatus('');
     render();
   };
@@ -293,6 +325,7 @@ function drawHistory() {
       date = session.date;
       dayId = day.id;
       drafts = new Map();
+      draftChanged = false;
       setStatus('');
       render();
     }));
@@ -311,8 +344,10 @@ async function importFile(input) {
       tab = 'training';
       date = isoDate(new Date());
       drafts = new Map();
+      draftChanged = false;
       render();
       setStatus('Trainingslog geladen.');
+      window.dispatchEvent(new Event('trainingslog:save'));
     }
   } catch {
     setStatus('Dit bestand is geen geldig trainingslog. Kies het oorspronkelijke JSON-bestand.');
@@ -356,6 +391,18 @@ $('export').onclick = () => {
   setTimeout(() => URL.revokeObjectURL(url),1000);
 };
 render();
+window.trainingLog = {
+  payload: () => data ? JSON.stringify(data) : null,
+  hasDraft: () => draftChanged,
+  applyCloud(payload) {
+    const imported = validate(JSON.parse(payload));
+    if (!persist(imported)) throw Error('De cloudversie kon lokaal niet worden opgeslagen.');
+    drafts = new Map();
+    draftChanged = false;
+    render();
+  }
+};
 </script>
+<script type="module" src="./cloud-sync.js"></script>
 </body>
 </html>
